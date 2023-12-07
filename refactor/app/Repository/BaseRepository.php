@@ -2,204 +2,109 @@
 
 namespace DTApi\Repository;
 
-use Validator;
+use DTApi\Repository\Interfaces\IRepository;
+use Illuminate\Foundation\Http\FormRequest;
+use Illuminate\Support\Carbon;
+use Illuminate\Support\Collection;
 use Illuminate\Database\Eloquent\Model;
-use DTApi\Exceptions\ValidationException;
-use Illuminate\Database\Eloquent\ModelNotFoundException;
 
-class BaseRepository
+class BaseRepository implements IRepository
 {
-
-    /**
-     * @var Model
-     */
-    protected $model;
-
-    /**
-     * @var array
-     */
-    protected $validationRules = [];
+    protected readonly Model $_model;
 
     /**
      * @param Model $model
      */
-    public function __construct(Model $model = null)
+    public function __construct(Model $model)
     {
-        $this->model = $model;
+        $this->_model = $model;
     }
 
-    /**
-     * @return array
-     */
-    public function validatorAttributeNames()
+    public function all(string $orderBy = "id", string $sort = "asc"): Collection
     {
-        return [];
+        return $this->_model
+            ->orderBy($orderBy, $sort)
+            ->get();
     }
 
-    /**
-     * @return Model
-     */
-    public function getModel()
+    public function findById(int | string $id): Model|null
     {
-        return $this->model;
+        return $this->_model->find($id);
     }
 
-    /**
-     * @return \Illuminate\Database\Eloquent\Collection|Model[]
-     */
-    public function all()
+    public function findOrNew(array $data): Model
     {
-        return $this->model->all();
+        $model = $this->_model->firstOrNew($data);
+
+        $model->save();
+
+        return $model->fresh();
     }
 
-    /**
-     * @param integer $id
-     * @return Model|null
-     */
-    public function find($id)
+    public function create(FormRequest $request): Model
     {
-        return $this->model->find($id);
+        $model = $this->_model->fill($request->all());
+
+        $this->setAuditableInformationFromRequest($model, $request);
+
+        $model->save();
+
+        return $model->fresh();
     }
 
-    public function with($array)
+    public function update(FormRequest $request): Model|null
     {
-        return $this->model->with($array);
-    }
+        $model = $this->_model->find($request->id);
 
-    /**
-     * @param integer $id
-     * @return Model
-     * @throws ModelNotFoundException
-     */
-    public function findOrFail($id)
-    {
-        return $this->model->findOrFail($id);
-    }
-
-    /**
-     * @param string $slug
-     * @return Model
-     * @throws ModelNotFoundException
-     */
-    public function findBySlug($slug)
-    {
-
-        return $this->model->where('slug', $slug)->first();
-
-    }
-
-    /**
-     * @return \Illuminate\Database\Eloquent\Builder
-     */
-    public function query()
-    {
-        return $this->model->query();
-    }
-
-    /**
-     * @param array $attributes
-     * @return Model
-     */
-    public function instance(array $attributes = [])
-    {
-        $model = $this->model;
-        return new $model($attributes);
-    }
-
-    /**
-     * @param int|null $perPage
-     * @return mixed
-     */
-    public function paginate($perPage = null)
-    {
-        return $this->model->paginate($perPage);
-    }
-
-    public function where($key, $where)
-    {
-        return $this->model->where($key, $where);
-    }
-
-    /**
-     * @param array $data
-     * @param null $rules
-     * @param array $messages
-     * @param array $customAttributes
-     * @return \Illuminate\Validation\Validator
-     */
-    public function validator(array $data = [], $rules = null, array $messages = [], array $customAttributes = [])
-    {
-        if (is_null($rules)) {
-            $rules = $this->validationRules;
+        if (!$model) {
+            return null;
         }
 
-        return Validator::make($data, $rules, $messages, $customAttributes);
+        $this->setAuditableInformationFromRequest($model, $request);
+
+        $model->update($request->all());
+
+        return $model->fresh();
     }
 
-    /**
-     * @param array $data
-     * @param null $rules
-     * @param array $messages
-     * @param array $customAttributes
-     * @return bool
-     * @throws ValidationException
-     */
-    public function validate(array $data = [], $rules = null, array $messages = [], array $customAttributes = [])
+    public function delete(int | string $id): Model|null
     {
-        $validator = $this->validator($data, $rules, $messages, $customAttributes);
-        return $this->_validate($validator);
-    }
+        $model = $this->_model->find($id);
 
-    /**
-     * @param array $data
-     * @return Model
-     */
-    public function create(array $data = [])
-    {
-        return $this->model->create($data);
-    }
+        if (!$model) {
+            return null;
+        }
 
-    /**
-     * @param integer $id
-     * @param array $data
-     * @return Model
-     */
-    public function update($id, array $data = [])
-    {
-        $instance = $this->findOrFail($id);
-        $instance->update($data);
-        return $instance;
-    }
-
-    /**
-     * @param integer $id
-     * @return Model
-     * @throws \Exception
-     */
-    public function delete($id)
-    {
-        $model = $this->findOrFail($id);
         $model->delete();
+
         return $model;
     }
 
-    /**
-     * @param \Illuminate\Validation\Validator $validator
-     * @return bool
-     * @throws ValidationException
-     */
-    protected function _validate(\Illuminate\Validation\Validator $validator)
+    public function count(): int
     {
-        if (!empty($attributeNames = $this->validatorAttributeNames())) {
-            $validator->setAttributeNames($attributeNames);
-        }
-
-        if ($validator->fails()) {
-            return false;
-            throw (new ValidationException)->setValidator($validator);
-        }
-
-        return true;
+        return $this->_model::all()->count();
     }
 
+    protected function setAuditableInformationFromRequest(Model | array $entity, $request)
+    {
+        if ($entity instanceof Model) {
+            if (!$entity->getKey()) {
+                $entity->setCreatedInfo($request->request_by);
+            } else {
+                $entity->setUpdatedInfo($request->request_by);
+            }
+        }
+
+        if (is_array($entity)) {
+            if (!array_key_exists('id', $entity) || $entity['id'] == 0) {
+                $entity['created_by'] = $request->request_by;
+                $entity['created_at'] = Carbon::now()->toDateTimeString();
+            } else {
+                $entity['updated_by'] = $request->request_by;
+                $entity['updated_at'] = Carbon::now()->toDateTimeString();
+            }
+
+            return $entity;
+        }
+    }
 }
